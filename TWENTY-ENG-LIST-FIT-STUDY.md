@@ -1,8 +1,10 @@
-# Twenty AI / MCP pattern study
+# Twenty eng List-fit study
 
 **Study notes only. Do not merge. Do not ship. Do not copy this repository into 1231FS.**
 
-Written for Reed to tip Avery on the 1231FS List AI roadmap. It records patterns observed in this fork (`4zhmv6zvj2-afk/twenty`), not a design for Twenty, and not vendor code for List.
+This fork (`4zhmv6zvj2-afk/twenty`) is the standing study surface for every lane when a lane needs it (UX, visual, security, eng). This note is the **eng** pass. AI / agents / chat / MCP is the primary subject (sections A–E). The later section is a short skim of other eng patterns that help keep List, not replace it. It is not a UX, visual, or security review.
+
+Written for Reed to tip Avery on the 1231FS List roadmap. It records patterns observed in this fork, not a design for Twenty, and not vendor code for List.
 
 Licence constraint, from this tree: `packages/twenty-server/package.json` is `AGPL-3.0`. The root `LICENSE` states the project is mostly AGPLv3, with an application exception for works that only call Twenty’s published HTTP APIs, and with MIT on listed packages including `twenty-shared` and `twenty-ui`. The AI chat module, tool registry, and MCP server live under `twenty-server`. Copy the patterns below. Do not copy those server files into 1231FS.
 
@@ -243,8 +245,58 @@ These assume the task framing: List is the engagement system of record; Clerk is
 
 ---
 
+## Other eng List-fit from code
+
+Skim only. The aim is to keep List’s engagement model (Clerk, Templates ticked by engagement id, Confirm on the desk-tools write). These are not features to port.
+
+### Board / kanban
+
+`ViewType.KANBAN` is a view layout, next to `TABLE`, `LIST`, and `CALENDAR` (`packages/twenty-shared/src/types/ViewType.ts`). Creating a kanban view stores `mainGroupByFieldMetadataId` only when the type is `KANBAN` (`packages/twenty-front/src/modules/views/view-picker/hooks/useCreateViewFromCurrentState.ts`). Changing that field rebuilds view groups (`handleFlatViewUpdateSideEffect` in `packages/twenty-server/src/engine/metadata-modules/flat-view/utils/handle-flat-view-update-side-effect.util.ts`). Columns are view groups over the same records, not a second object.
+
+**List:** a board of engagements is a grouping of the engagement rows List already stores (status or stage on the engagement). Template ticks and Confirm stay on the engagement id. Do not add a board table.
+
+### Detail related lists
+
+A record page can embed a relation as a table widget. `getFieldWidgetRelationTraversal` points the embedded view at the far object and scopes it back through the inverse field to the current record id (`packages/twenty-front/src/modules/page-layout/widgets/field/utils/getFieldWidgetRelationTraversal.ts`). `FieldWidgetRelationTable` renders that view for the open `recordId`. A one-to-many hop is what carries the join column back to the current record. Nested hops and junction widgets exist (`RecordTableWidgetContext.ts`); they are extra, not the List shape.
+
+**List:** related rows on an engagement (template lines, child work) are a query filtered by engagement id, written through the same desk-tools path. The widget does not own a private store.
+
+### Same-object parent → child
+
+`RelationType` is `MANY_TO_ONE` or `ONE_TO_MANY` (`packages/twenty-shared/src/types/RelationType.ts`). Creating a relation writes a pair: the many-to-one side holds `joinColumnName` and `onDelete: SET_NULL`; the other side is the one-to-many inverse with no join column (`generateMorphOrRelationFlatFieldMetadataPair` in `packages/twenty-server/src/engine/metadata-modules/flat-field-metadata/utils/generate-morph-or-relation-flat-field-metadata-pair.util.ts`). Source and target are separate object-metadata ids. `validateRelationCreationPayload` checks that the target exists; it does not reject a target id equal to the source object (`packages/twenty-server/src/engine/metadata-modules/flat-field-metadata/validators/utils/validate-relation-creation-payload.util.ts`). This skim did not find a standard object (task, company, person) that ships a parent field to itself.
+
+**List:** if an engagement has a parent engagement, the child row holds the parent id and the parent’s children are the inverse query — the same mechanism as the related list. Do not import Twenty’s metadata relation builder. Do not invent a second hierarchy store.
+
+### Permissions / roles
+
+A user workspace maps to one role id (`UserRoleService.getRoleIdForUserWorkspace` reads `userWorkspaceRoleMap`). A role has global record flags (`canReadAllObjectRecords`, `canUpdateAllObjectRecords`, `canSoftDeleteAllObjectRecords`, `canDestroyAllObjectRecords`) and per-object overrides for the same four verbs (`role-permissions.schema.ts`, `upsert-object-permissions.tool.ts`). Omitting an object from the override list drops that override and falls back to the global flags. Assignability is separate for users, agents, and API keys (`canBeAssignedToUsers`, `canBeAssignedToAgents`, `canBeAssignedToApiKeys`).
+
+**List:** the Clerk user is one role. An agent or MCP key is assigned only if that role allows it, and its grants stay the intersection described in section B.4. “May tick a template” belongs on that role (or on Confirm inside the write), not in a chat-only allow-list. Read and destroy are different flags; do not treat read as permission to tick.
+
+### API write shape
+
+Core REST is `RestApiCoreController` at `ApiPath.Rest` (`/rest`), guarded by JWT, workspace, and `CustomPermissionGuard`:
+
+| Verb | Effect |
+| --- | --- |
+| `POST /rest/{object}` | create one, HTTP 201 |
+| `POST /rest/batch/{object}` | create many |
+| `GET` | find one or many |
+| `PATCH` and `PUT` | both call `update` (PUT kept so old clients do not break; comment in the controller) |
+| `DELETE` | see below |
+| `PATCH …/restore` | restore |
+| `PATCH …/merge` | merge many |
+
+`RestApiCoreService.delete` reads `soft_delete`. `parseSoftDeleteRestRequest` returns false when the query param is absent, so a bare `DELETE` is destroy (`rest-api-destroy-one.handler.ts` → `CommonDestroyOneQueryRunnerService`). `soft_delete=true` soft-deletes (`CommonDeleteOneQueryRunnerService`). The AI tool path does the opposite for `delete_one`: `ToolExecutorService` always passes `soft: true` and does not expose restore.
+
+REST handlers and the AI record-crud services both call those common query runners. GraphQL record operations use the same runner family. The write shape is one runner layer, several fronts.
+
+**List:** desk-tools, MCP, and the later chatbox must call that one write. Match the verb List already uses for a template tick. Do not let an agent `DELETE` mean “tick” or “archive” because Twenty’s REST default and Twenty’s agent delete disagree. Confirm sits in the runner List already trusts, so every front hits it.
+
 ## What this note did not verify
 
-- Runtime behaviour against a running Twenty workspace. Findings are from source and the tests named above, not from an executed chat or MCP session.
-- 1231FS List, Clerk, Templates, or Confirm implementation. Section C is a risk list against the stated framing.
+- Runtime behaviour against a running Twenty workspace. Findings are from source and the tests named above, not from an executed chat, MCP session, or board.
+- 1231FS List, Clerk, Templates, or Confirm implementation. Section C and the List lines above are risks against the stated framing.
+- A UX, visual, or security review. Other seats own those. This note does not judge layout, colour, or threat models.
 - Whether Twenty’s commercial `@license Enterprise` headers appear on any AI file. The root `LICENSE` describes that marker; this note did not inventory every AI file for it. The server package licence field is still `AGPL-3.0`.
+- A shipped same-object parent field on a standard CRM object. The relation pair allows it; this skim did not find one.
